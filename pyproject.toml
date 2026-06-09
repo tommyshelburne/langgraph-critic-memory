@@ -3,6 +3,7 @@ name = "langgraph-critic-memory"
 version = "0.1.0"
 description = "LangGraph demo: long-term Store memory + an adversarial critic gate with an iterate loop."
 requires-python = ">=3.10"
+classifiers = ["License :: OSI Approved :: MIT License"]
 dependencies = [
     "langgraph>=0.3,<2",
     "langchain>=0.3",

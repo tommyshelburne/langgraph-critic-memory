@@ -1,5 +1,7 @@
 # langgraph-critic-memory
 
+[![CI](https://github.com/tommyshelburne/langgraph-critic-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/tommyshelburne/langgraph-critic-memory/actions/workflows/ci.yml)
+
 A small, runnable LangGraph agent that pairs **long-term `Store` memory** with an
 **adversarial critic gate** and a bounded **iterate loop**. It's a deliberately
 compact demonstration of the production-reliability patterns the agent literature
