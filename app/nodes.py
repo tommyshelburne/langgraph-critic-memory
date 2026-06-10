@@ -3,7 +3,8 @@
 recall   — pull relevant long-term memories from the Store and inject them (grounding)
 generate — produce/revise a draft, conditioned on memory + any prior critique
 critic   — adversarial gate returning ACKNOWLEDGED / ITERATE / REJECTED  (the Hermes analog)
-remember — consolidate the accepted outcome back into the Store (episodic write)
+remember — write the outcome as an episodic memory; periodically reflect recent
+           episodes into an abstracted semantic insight (Generative-Agents style)
 escalate — rejected or iterate-cap exhausted → optional human-in-the-loop interrupt
 """
 
@@ -14,7 +15,11 @@ from langgraph.store.base import BaseStore
 from langgraph.types import interrupt
 
 from app.llm import get_model
-from app.state import Critique, State
+from app.state import Critique, Importance, State
+
+# Accrued importance that triggers a consolidation. Park et al. use 150 on a
+# 1-10 importance scale; kept small here so the demo reflects after ~2 episodes.
+REFLECTION_THRESHOLD = 10
 
 
 def _namespace(config: RunnableConfig) -> tuple[str, str]:
@@ -72,19 +77,85 @@ def route_after_critic(state: State) -> str:
     return "escalate"  # REJECTED, or ITERATE past the cap
 
 
-def remember(state: State, config: RunnableConfig, *, store: BaseStore) -> dict:
-    """Episodic consolidation: write the accepted outcome to long-term memory.
-
-    A production version would summarize/reflect (Generative-Agents style) rather
-    than store the raw draft; kept simple here.
-    """
-    summary = f"Task: {state['task']} -> {state['draft']}"
-    store.put(
-        _namespace(config),
-        str(uuid4()),
-        {"text": summary, "task": state["task"], "result": state["draft"]},
+def _rate_importance(task: str, draft: str) -> int:
+    """LLM-rated salience (1-10) of an outcome — the reflection trigger signal."""
+    prompt = (
+        "Rate how important this outcome is to remember long-term, "
+        "1 (mundane) to 10 (pivotal).\n\n"
+        f"Task: {task}\nOutcome: {draft}"
     )
-    return {"result": state["draft"]}
+    try:
+        score = get_model().with_structured_output(Importance).invoke(prompt).score
+        return max(1, min(10, int(score)))
+    except Exception:
+        return 5
+
+
+def _reflect(store: BaseStore, namespace: tuple[str, str], episodic_keys: list[str]) -> str:
+    """Episodic -> semantic consolidation (Generative-Agents 'reflection').
+
+    Pull the recent episodes, synthesize ONE higher-level insight, and store it
+    back as a distinct `reflection` memory that cites the episodes it drew on.
+    """
+    episodes = []
+    for key in episodic_keys:
+        item = store.get(namespace, key)
+        if item:
+            episodes.append(item.value.get("text", ""))
+    joined = "\n".join(f"- {e}" for e in episodes) or "(none)"
+
+    prompt = (
+        "You are consolidating memory. From these recent episodes, extract ONE "
+        "higher-level insight — a reusable, de-contextualized takeaway, not a restatement.\n\n"
+        f"Recent episodes:\n{joined}\n"
+    )
+    insight = get_model().invoke(prompt).content
+    store.put(
+        namespace,
+        str(uuid4()),
+        {"kind": "reflection", "text": insight, "sources": episodic_keys},
+    )
+    return insight
+
+
+def remember(state: State, config: RunnableConfig, *, store: BaseStore) -> dict:
+    """Write the accepted outcome as an episodic memory, then consolidate.
+
+    Generative-Agents style: every outcome is logged as a raw `episodic` memory
+    with an importance score; once accrued importance crosses a threshold, a
+    `reflection` step abstracts the recent episodes into a semantic insight and
+    resets the accumulator. Raw episodes are kept; reflections coexist beside them.
+    """
+    namespace = _namespace(config)
+
+    importance = _rate_importance(state["task"], state["draft"])
+    episodic_key = str(uuid4())
+    store.put(
+        namespace,
+        episodic_key,
+        {
+            "kind": "episodic",
+            "text": f"Task: {state['task']} -> {state['draft']}",
+            "task": state["task"],
+            "result": state["draft"],
+            "importance": importance,
+        },
+    )
+
+    # The reflection accumulator must persist across sessions, so it lives in the
+    # cross-thread Store (a separate 'meta' namespace), not in per-thread state.
+    meta_ns = (namespace[0], "meta")
+    bucket = store.get(meta_ns, "reflect")
+    pending = (bucket.value["pending"] if bucket else []) + [episodic_key]
+    accrued = (bucket.value["accrued"] if bucket else 0) + importance
+
+    out: dict = {"result": state["draft"], "importance": importance}
+    if accrued >= REFLECTION_THRESHOLD:
+        out["reflection"] = _reflect(store, namespace, pending)
+        pending, accrued = [], 0  # reset the trigger after consolidating
+
+    store.put(meta_ns, "reflect", {"pending": pending, "accrued": accrued}, index=False)
+    return out
 
 
 def escalate(state: State, config: RunnableConfig) -> dict:

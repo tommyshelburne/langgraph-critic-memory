@@ -31,6 +31,8 @@ class _StubChat:
 
     def invoke(self, prompt):
         text = prompt if isinstance(prompt, str) else str(prompt)
+        if "higher-level insight" in text or "consolidating memory" in text:
+            return AIMessage(content="[stub] reflection: recent episodes share a recurring pattern")
         if "Revise" in text:
             return AIMessage(content="[stub] revised draft addressing the critic's asks [revised]")
         return AIMessage(content="[stub] initial draft")
@@ -40,22 +42,29 @@ class _StubChat:
 
 
 class _StructuredStub:
-    """Stub for `model.with_structured_output(Critique)` — keeps node code
-    identical between the stub and a real model."""
+    """Stub for `model.with_structured_output(schema)` — keeps node code identical
+    between the stub and a real model. Branches on the schema so both the critic
+    (Critique) and the importance-rater (Importance) get deterministic, valid
+    instances."""
 
     def __init__(self, schema):
         self.schema = schema
 
     def invoke(self, prompt):
         text = prompt if isinstance(prompt, str) else str(prompt)
-        if "[revised]" in text:
+        name = self.schema.__name__
+        if name == "Critique":
+            if "[revised]" in text:
+                return self.schema(
+                    verdict="ACKNOWLEDGED",
+                    reasons="stub: the revision addresses the asks",
+                    asks=[],
+                )
             return self.schema(
-                verdict="ACKNOWLEDGED",
-                reasons="stub: the revision addresses the asks",
-                asks=[],
+                verdict="ITERATE",
+                reasons="stub: first draft is too generic",
+                asks=["Add a concrete, specific example"],
             )
-        return self.schema(
-            verdict="ITERATE",
-            reasons="stub: first draft is too generic",
-            asks=["Add a concrete, specific example"],
-        )
+        if name == "Importance":
+            return self.schema(score=5, rationale="stub: default mid importance")
+        return self.schema()

@@ -39,3 +39,21 @@ def test_memory_persists_across_threads():
         {"configurable": {"thread_id": "b", "user_id": "shared"}},
     )
     assert out.get("recalled"), "expected the Store to surface the memory written on thread 'a'"
+
+
+def test_reflection_consolidation_after_threshold():
+    # Stub importance = 5/outcome; REFLECTION_THRESHOLD = 10 → reflect after 2 episodes.
+    store = build_store()
+    graph = build_graph(store)
+    for i in range(2):
+        graph.invoke(
+            {"task": f"episode {i}", "iterations": 0, "max_iterations": 2},
+            {"configurable": {"thread_id": f"r{i}", "user_id": "refl"}},
+        )
+    items = store.search(("refl", "memories"), limit=50)
+    kinds = [it.value.get("kind") for it in items]
+    assert "episodic" in kinds, "raw episodes should be retained"
+    assert "reflection" in kinds, "a semantic reflection should have been consolidated"
+
+    reflection = next(it for it in items if it.value.get("kind") == "reflection")
+    assert reflection.value.get("sources"), "reflection must cite the episodes it drew on"

@@ -17,6 +17,8 @@ def _run(graph, task: str, thread: str, user: str = "tommy") -> None:
     print(f"  recalled  : {out.get('recalled')}")
     print(f"  iterations: {out.get('iterations')}   verdict: {out.get('verdict')}")
     print(f"  result    : {out.get('result')}")
+    if out.get("reflection"):
+        print(f"  reflection: {out['reflection']}   (episodic -> semantic consolidation fired)")
     if out.get("escalation"):
         print(f"  escalation: {out['escalation']}")
 

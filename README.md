@@ -24,7 +24,7 @@ fleet ("OpenClaw") into the idiomatic LangGraph abstractions.
 | `generate` | Produce/revise conditioned on memory + prior critique | plan-then-execute / Reflexion-style revision (Shinn et al., NeurIPS 2023) |
 | `critic` | Adversarial gate → `ACKNOWLEDGED / ITERATE / REJECTED` | Verification-at-handoffs beats prompt tweaks (Berkeley **MAST**, NeurIPS 2025; *AgentAsk*, 2025) |
 | iterate cap | Bound the refine loop (≤ `max_iterations`) | Avoids the error-cascade / non-termination failure modes (MAST FC3) |
-| `remember` | Consolidate the accepted outcome back to the Store | Episodic write-summarize-recall (cheapest semantic-memory layer that pays off) |
+| `remember` | Log the outcome as an episodic memory, then periodically **reflect** recent episodes into a semantic insight | Episodic→semantic consolidation (Park et al., *Generative Agents*, UIST 2023) |
 | `escalate` | Dead-end → optional human-in-the-loop `interrupt()` | Human-in-the-loop as the closing move; LangGraph-native HITL |
 
 **Two memory tiers, on purpose.** The graph compiles with both a *checkpointer*
@@ -71,7 +71,7 @@ python -m app.main
   *exactly-once* crash recovery (no agent framework provides it natively), drive the
   graph under a durable-execution backend (e.g. Temporal).
 - **Observability:** add LangSmith tracing, or emit OpenTelemetry GenAI spans.
-- **Memory consolidation:** replace `remember`'s raw write with a reflection/summarize step.
+- **Memory consolidation:** `remember` already does episodic→semantic reflection (importance-scored, threshold-triggered). Next steps: tune `REFLECTION_THRESHOLD`, or upgrade `recall` to multi-signal retrieval (recency + importance + relevance) instead of relevance-only.
 
 ## Layout
 
