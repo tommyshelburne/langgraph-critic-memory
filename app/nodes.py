@@ -1,6 +1,7 @@
 """Graph nodes.
 
-recall   — pull relevant long-term memories from the Store and inject them (grounding)
+recall   — multi-signal retrieval over the Store: recency + importance + relevance
+           (Park et al., Generative Agents), injected as grounding
 generate — produce/revise a draft, conditioned on memory + any prior critique
 critic   — adversarial gate returning ACKNOWLEDGED / ITERATE / REJECTED  (the Hermes analog)
 remember — write the outcome as an episodic memory; periodically reflect recent
@@ -8,6 +9,7 @@ remember — write the outcome as an episodic memory; periodically reflect recen
 escalate — rejected or iterate-cap exhausted → optional human-in-the-loop interrupt
 """
 
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from langchain_core.runnables import RunnableConfig
@@ -21,15 +23,65 @@ from app.state import Critique, Importance, State
 # 1-10 importance scale; kept small here so the demo reflects after ~2 episodes.
 REFLECTION_THRESHOLD = 10
 
+# Retrieval scoring (Park et al.): score = α_r·recency + α_i·importance + α_v·relevance,
+# all α = 1. Two deliberate deviations from the paper: (1) recency decays on last
+# WRITE (updated_at), not last access — recall stays a pure read, no write-on-read;
+# (2) recency is used RAW (0.995^hours is already in (0,1]), not pool min-maxed —
+# min-max over a same-session pool stretches microsecond write-order deltas to the
+# full [0,1] range, letting insertion order swamp a 9-point importance gap.
+# Importance and relevance ARE min-maxed per the paper (their raw scales need it).
+RECENCY_DECAY_PER_HOUR = 0.995
+ALPHA_RECENCY = ALPHA_IMPORTANCE = ALPHA_RELEVANCE = 1.0
+CANDIDATE_POOL = 20   # candidates fetched by similarity before re-ranking
+RECALL_TOP_N = 5      # memories injected after re-ranking
+DEFAULT_IMPORTANCE = 5
+
 
 def _namespace(config: RunnableConfig) -> tuple[str, str]:
     user = config["configurable"].get("user_id", "default")
     return (user, "memories")
 
 
+def _minmax(values: list[float]) -> list[float]:
+    """Normalize to [0,1]; a degenerate (constant) signal contributes equally to all."""
+    lo, hi = min(values), max(values)
+    if hi - lo < 1e-12:
+        return [0.5] * len(values)
+    return [(v - lo) / (hi - lo) for v in values]
+
+
 def recall(state: State, config: RunnableConfig, *, store: BaseStore) -> dict:
-    hits = store.search(_namespace(config), query=state["task"], limit=5)
-    return {"recalled": [item.value.get("text", "") for item in hits]}
+    """Multi-signal memory retrieval (Park et al., Generative Agents).
+
+    Embedding similarity alone surfaces 'hard distractors' — semantically similar
+    but wrong memories. So similarity only nominates a candidate pool; the final
+    ranking is recency (raw decay) + importance + relevance (each min-maxed),
+    summed with equal weights.
+    """
+    hits = store.search(_namespace(config), query=state["task"], limit=CANDIDATE_POOL)
+    if not hits:
+        return {"recalled": []}
+
+    now = datetime.now(timezone.utc)
+    relevance = [hit.score or 0.0 for hit in hits]
+    recency = [
+        RECENCY_DECAY_PER_HOUR ** max(0.0, (now - hit.updated_at).total_seconds() / 3600)
+        for hit in hits
+    ]
+    importance = [float(hit.value.get("importance", DEFAULT_IMPORTANCE)) for hit in hits]
+
+    combined = [
+        ALPHA_RECENCY * r + ALPHA_IMPORTANCE * i + ALPHA_RELEVANCE * v
+        for r, i, v in zip(recency, _minmax(importance), _minmax(relevance))
+    ]
+    ranked = sorted(zip(combined, range(len(hits))), key=lambda t: t[0], reverse=True)
+
+    recalled = []
+    for _, idx in ranked[:RECALL_TOP_N]:
+        value = hits[idx].value
+        text = value.get("text", "")
+        recalled.append(f"[reflection] {text}" if value.get("kind") == "reflection" else text)
+    return {"recalled": recalled}
 
 
 def generate(state: State) -> dict:
@@ -113,7 +165,10 @@ def _reflect(store: BaseStore, namespace: tuple[str, str], episodic_keys: list[s
     store.put(
         namespace,
         str(uuid4()),
-        {"kind": "reflection", "text": insight, "sources": episodic_keys},
+        # Reflections get a fixed high importance: an abstraction distilled from
+        # several episodes should outrank the raw episodes at recall time.
+        # (Park et al. rate reflections with the LLM; fixed keeps the demo deterministic.)
+        {"kind": "reflection", "text": insight, "sources": episodic_keys, "importance": 8},
     )
     return insight
 
@@ -144,17 +199,25 @@ def remember(state: State, config: RunnableConfig, *, store: BaseStore) -> dict:
 
     # The reflection accumulator must persist across sessions, so it lives in the
     # cross-thread Store (a separate 'meta' namespace), not in per-thread state.
+    # Persist the episode into the bucket BEFORE attempting reflection: if the
+    # reflection LLM call fails, the episode stays accumulated and consolidation
+    # simply retries on the next episode instead of being silently dropped.
     meta_ns = (namespace[0], "meta")
     bucket = store.get(meta_ns, "reflect")
     pending = (bucket.value["pending"] if bucket else []) + [episodic_key]
     accrued = (bucket.value["accrued"] if bucket else 0) + importance
+    store.put(meta_ns, "reflect", {"pending": pending, "accrued": accrued}, index=False)
 
     out: dict = {"result": state["draft"], "importance": importance}
     if accrued >= REFLECTION_THRESHOLD:
-        out["reflection"] = _reflect(store, namespace, pending)
-        pending, accrued = [], 0  # reset the trigger after consolidating
-
-    store.put(meta_ns, "reflect", {"pending": pending, "accrued": accrued}, index=False)
+        try:
+            out["reflection"] = _reflect(store, namespace, pending)
+        except Exception:
+            # Reflection is an enhancement, not a contract: the episode is durably
+            # stored and the accumulator is intact, so a transient model failure
+            # must not fail a run the critic already ACKNOWLEDGED.
+            return out
+        store.put(meta_ns, "reflect", {"pending": [], "accrued": 0}, index=False)
     return out
 
 
